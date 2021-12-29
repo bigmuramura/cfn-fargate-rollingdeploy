@@ -1,0 +1,686 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Fargate*1 with Rolling Deployment, AutoScaling and Firelens
+# AutoScaling Enable
+# Service Discovery Enable
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Common Settings
+        Parameters:
+          - ProjectName
+          - Environment
+      - Label:
+          default: ECS VPC Settings
+        Parameters:
+          - VPCID
+          - PublicSubnet1
+          - PublicSubnet2
+          - PrivateSubnet1
+          - PrivateSubnet2
+
+Parameters:
+  ProjectName:
+    Description: Project Name
+    Type: String
+    Default: unnamed
+  Environment:
+    Description: Environment
+    Type: String
+    Default: dev
+    AllowedValues:
+      - prod
+      - dev
+      - stg
+  VPCID:
+    Type: AWS::EC2::VPC::Id
+  PublicSubnet1:
+    Description: "ELB Subnet 1st"
+    Type: AWS::EC2::Subnet::Id
+  PublicSubnet2:
+    Description: "ELB Subnet 2nd"
+    Type: AWS::EC2::Subnet::Id
+  PrivateSubnet1:
+    Description: "ECS Subnet 1st"
+    Type: AWS::EC2::Subnet::Id
+  PrivateSubnet2:
+    Description: "ECS Subnet 2nd"
+    Type: AWS::EC2::Subnet::Id
+  ClusterName:
+    Type: String
+    Default: cluster
+  AppName:
+    Type: String
+    Default: web
+  ServiceName:
+    Type: String
+    Default: service
+  TaskDefinitionName:
+    Type: String
+    Default: taskdefinition
+  ImageNameWeb:
+    Description: "Web Application Repository Name also Need to TagName"
+    Type: String
+    Default: "public.ecr.aws/nginx/nginx:latest"
+  ImageNameFirelens:
+    Description: "Firelens Repository Name also Need to TagName"
+    Type: String
+    Default: "public.ecr.aws/aws-observability/aws-for-fluent-bit:latest"
+
+Mappings:
+  S3Config:
+    us-east-1:
+      BucketPrincipal: "127311923021"
+    us-east-2:
+      BucketPrincipal: "033677994240"
+    us-west-1:
+      BucketPrincipal: "027434742980"
+    us-west-2:
+      BucketPrincipal: "797873946194"
+    ca-central-1:
+      BucketPrincipal: "985666609251"
+    eu-central-1:
+      BucketPrincipal: "054676820928"
+    eu-west-1:
+      BucketPrincipal: "156460612806"
+    eu-west-2:
+      BucketPrincipal: "652711504416"
+    eu-west-3:
+      BucketPrincipal: "009996457667"
+    eu-north-1:
+      BucketPrincipal: "897822967062"
+    ap-east-1:
+      BucketPrincipal: "754344448648"
+    ap-northeast-1:
+      BucketPrincipal: "582318560864"
+    ap-northeast-2:
+      BucketPrincipal: "600734575887"
+    ap-northeast-3:
+      BucketPrincipal: "383597477331"
+    ap-southeast-1:
+      BucketPrincipal: "114774131450"
+    ap-southeast-2:
+      BucketPrincipal: "783225319266"
+    ap-south-1:
+      BucketPrincipal: "718504428378"
+    sa-east-1:
+      BucketPrincipal: "507241528517"
+    us-gov-west-1:
+      BucketPrincipal: "048591011584"
+    us-gov-east-1:
+      BucketPrincipal: "190560391635"
+    cn-north-1:
+      BucketPrincipal: "638102146993"
+    cn-northwest-1:
+      BucketPrincipal: "037604701340"
+
+Resources:
+  # --------------------------------------------
+  # ELB
+  # --------------------------------------------
+  ELB1:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: "application"
+      Name: !Sub ${ProjectName}-${Environment}-elb
+      Scheme: "internet-facing"
+      SecurityGroups:
+        - !Ref SecurityGroup2
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      IpAddressType: "ipv4"
+      LoadBalancerAttributes:
+        - Key: "access_logs.s3.enabled"
+          Value: "true"
+        - Key: "access_logs.s3.bucket"
+          Value: !Sub ${ProjectName}-${Environment}-elblogs-${AWS::AccountId}
+        - Key: "access_logs.s3.prefix"
+          Value: !Sub ${ProjectName}-${Environment}-elb
+        - Key: "deletion_protection.enabled"
+          Value: "false"
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-elb
+
+  ELBListener1:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup1
+          Type: "forward"
+      LoadBalancerArn: !Ref ELB1
+      Port: 80
+      Protocol: "HTTP"
+
+  TargetGroup1:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      VpcId: !Ref VPCID
+      Name: !Sub ${ProjectName}-${Environment}-tg1
+      Protocol: "HTTP"
+      HealthCheckPath: "/"
+      Port: 80
+      TargetType: "ip"
+      HealthCheckIntervalSeconds: 10 # Default is 30.
+      HealthyThresholdCount: 2 # Default is 5.
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: "stickiness.enabled"
+          Value: "false"
+        - Key: deregistration_delay.timeout_seconds
+          Value: "60" # default is 300.
+        - Key: "stickiness.type"
+          Value: "lb_cookie"
+        - Key: "stickiness.lb_cookie.duration_seconds"
+          Value: "86400"
+        - Key: "slow_start.duration_seconds"
+          Value: "0"
+        - Key: "load_balancing.algorithm.type"
+          Value: "round_robin"
+
+  # --------------------------------------------
+  # S3
+  # --------------------------------------------
+  # ELB access logs
+  S3Bucket1:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      BucketName: !Sub ${ProjectName}-${Environment}-elblogs-${AWS::AccountId}
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: "Enabled"
+      LifecycleConfiguration:
+        Rules:
+          - Id: AutoDelete
+            Status: Enabled
+            ExpirationInDays: 14
+          - Id: NoncurrentVersionExpiration
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 7
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-elblogs-${AWS::AccountId}
+  S3BucketLogsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref "S3Bucket1"
+      PolicyDocument:
+        Id: ElblogsBucketPolicy
+        Statement:
+          - Sid: AWSLogDeliveryWrite
+            Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource:
+              - !Sub "arn:aws:s3:::${S3Bucket1}/*"
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+          - Sid: AWSLogDeliveryAclCheck
+            Effect: Allow
+            Action:
+              - s3:GetBucketAcl
+            Resource:
+              - !Sub "arn:aws:s3:::${S3Bucket1}"
+            Principal:
+              Service: delivery.logs.amazonaws.com
+          - Sid: AddPerm
+            Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource:
+              - !Sub "arn:aws:s3:::${S3Bucket1}/*"
+            Principal:
+              AWS: !FindInMap
+                - S3Config
+                - !Ref "AWS::Region"
+                - BucketPrincipal
+  # FireLens
+  S3Bucket2:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      BucketName: !Sub ${ProjectName}-${Environment}-firelens-${AWS::AccountId}
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: "Enabled"
+      LifecycleConfiguration:
+        Rules:
+          - Id: AutoDelete
+            Status: Enabled
+            ExpirationInDays: 400
+          - Id: NoncurrentVersionExpiration
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 7
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-firelens-${AWS::AccountId}
+
+  # --------------------------------------------
+  # Kinesis Firehose
+  # --------------------------------------------
+  # FireLens
+  DeliveryStream:
+    Type: "AWS::KinesisFirehose::DeliveryStream"
+    Properties:
+      DeliveryStreamName: !Sub ${ProjectName}-${Environment}-firelens-deliverystream
+      DeliveryStreamType: DirectPut
+      S3DestinationConfiguration:
+        BucketARN: !GetAtt S3Bucket2.Arn
+        Prefix: !Sub ${ProjectName}-${Environment}-firelens
+        BufferingHints:
+          IntervalInSeconds: 300
+          SizeInMBs: 5
+        CompressionFormat: GZIP
+        RoleARN: !GetAtt FirehoseRole1.Arn
+      # DeliveryStreamEncryptionConfigurationInput:
+      #   KeyType: "AWS_OWNED_CMK"
+
+  # --------------------------------------------
+  # CloudWatch Logs Group
+  # --------------------------------------------
+  # FireLens Stdout
+  FireLensLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Sub "${ProjectName}-${Environment}-${ClusterName}-firelens-logs"
+      RetentionInDays: 400
+
+  # --------------------------------------------
+  # ECS Fargate
+  # --------------------------------------------
+  # Cluster
+  ECSCluster:
+    Type: "AWS::ECS::Cluster"
+    Properties:
+      ClusterName: !Sub "${ProjectName}-${Environment}-${ClusterName}"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      CapacityProviders:
+        - "FARGATE_SPOT"
+        - "FARGATE"
+      # Capacity Provider Setting
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: "FARGATE"
+          Weight: 0
+          Base: 1
+        - CapacityProvider: "FARGATE_SPOT"
+          Weight: 1
+          Base: 0
+
+  # Service
+  ECSService:
+    Type: "AWS::ECS::Service"
+    Properties:
+      ServiceName: !Sub ${ProjectName}-${Environment}-${ServiceName}
+      Cluster: !Ref ECSCluster
+      LaunchType: "FARGATE"
+      PlatformVersion: "1.4.0"
+      DeploymentController:
+        Type: ECS # Rolling update
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      ServiceRegistries:
+        - RegistryArn: !GetAtt ServiceDiscovery.Arn
+      DesiredCount: 1
+      LoadBalancers:
+        - TargetGroupArn: !Ref TargetGroup1
+          ContainerName: !Ref AppName
+          ContainerPort: 80
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: "DISABLED"
+          SecurityGroups:
+            - !Ref SecurityGroup1
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+      TaskDefinition: !Ref ECSTaskDefinition
+    DependsOn: ELBListener1
+  # ECS TaskDefinition
+  ECSTaskDefinition:
+    Type: "AWS::ECS::TaskDefinition"
+    Properties:
+      Family: !Sub "${ProjectName}-${Environment}-${AppName}-${TaskDefinitionName}"
+      TaskRoleArn: !GetAtt ECSTaskRole1.Arn
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole1.Arn
+      NetworkMode: "awsvpc"
+      RequiresCompatibilities:
+        - "FARGATE"
+      Cpu: "256"
+      Memory: "512"
+      ContainerDefinitions:
+        - Essential: true
+          Name: !Ref AppName
+          Image: !Ref ImageNameWeb
+          LogConfiguration:
+            LogDriver: "awsfirelens"
+          PortMappings:
+            - ContainerPort: 80
+              HostPort: 80
+              Protocol: "tcp"
+        - Essential: true
+          Name: "log_router"
+          Image: !Ref ImageNameFirelens
+          LogConfiguration:
+            LogDriver: "awslogs"
+            Options:
+              awslogs-group: !Ref FireLensLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: "FireLens"
+          FirelensConfiguration:
+            Type: "fluentbit"
+            Options:
+              config-file-type: "file"
+              config-file-value: "/fluent-bit/etc/extra.conf"
+          User: "0"
+
+  # --------------------------------------------
+  # Security Group
+  # --------------------------------------------
+  # Security Group for Web
+  SecurityGroup1:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-${AppName}-sg
+      GroupDescription: Web App Security Group
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref SecurityGroup2
+          Description: "Access from ELB"
+      VpcId: !Ref VPCID
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-${AppName}-sg
+  # Security Group for ELB
+  SecurityGroup2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-elb-sg
+      GroupDescription: ELB Security Group
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+          Description: "Access from Public"
+      VpcId: !Ref VPCID
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-elb-sg
+
+  # --------------------------------------------
+  # IAM Role
+  # --------------------------------------------
+  # ECS Task Execution Role
+  ECSTaskExecutionRole1:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-${AppName}-ECSTaskExecutionRole
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - !Ref GetValueSecretsManagerPolicy
+  # ECS Task Role
+  ECSTaskRole1:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: "/"
+      RoleName: !Sub ${ProjectName}-${Environment}-${AppName}-ECSTaskRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref ECSExecPolicy
+        - !Ref SentCloudWatchLogsPolicy
+        - !Ref SentKinesisDataFirehosePolicy
+  FirehoseRole1:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-FirehoseRole
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref DeliveryS3Policy
+
+  # --------------------------------------------
+  # IAM Policy
+  # --------------------------------------------
+  # Allowed Secrets Manager for Task Execute Role
+  GetValueSecretsManagerPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectName}-${Environment}-GetValueSecretsManagerPolicy"
+      Path: "/"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - kms:Decrypt
+            Resource: "*" # Change Required !!!
+
+  # Allowed ECS Exec for Task Role
+  ECSExecPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectName}-${Environment}-ECSExecPolicy"
+      Path: "/"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssmmessages:CreateControlChannel
+              - ssmmessages:CreateDataChannel
+              - ssmmessages:OpenControlChannel
+              - ssmmessages:OpenDataChannel
+            Resource: "*"
+  # Sent CloudWatch Logs for Task Role
+  SentCloudWatchLogsPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectName}-${Environment}-SentCloudWatchLogsPolicy"
+      Path: "/"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:CreateLogGroup
+              - logs:DescribeLogStreams
+              - logs:PutLogEvents
+              - logs:PutRetentionPolicy
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+
+  # Delivery S3 for Kinesis Forehose
+  DeliveryS3Policy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectName}-${Environment}-DeliveryS3Policy"
+      Path: "/"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:AbortMultipartUpload
+              - s3:GetBucketLocation
+              - s3:GetObject
+              - s3:ListBucket
+              - s3:ListBucketMultipartUploads
+              - s3:PutObject
+            Resource:
+              - !Sub arn:aws:s3:::${S3Bucket2}
+              - !Sub arn:aws:s3:::${S3Bucket2}/*
+
+  # Sent Kinesis Data Firehose for Task Role
+  SentKinesisDataFirehosePolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectName}-${Environment}-SentKinesisDataFirehosePolicy"
+      Path: "/"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - firehose:PutRecordBatch
+            Resource: !GetAtt DeliveryStream.Arn
+
+  # ------------------------------------------------------------#
+  #  Auto Scaling Service
+  # ------------------------------------------------------------#
+  ServiceScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: 1
+      MaxCapacity: 4
+      ResourceId: !Sub service/${ECSCluster}/${ProjectName}-${Environment}-${ServiceName}
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+    DependsOn:
+      - ECSService
+
+  ServiceScaleOutPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${ProjectName}-${Environment}-${ServiceName}-ScaleOutPolicy"
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+          - ScalingAdjustment: 1
+            MetricIntervalLowerBound: 0
+
+  ServiceScaleInPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${ProjectName}-${Environment}-${ServiceName}-ScaleInPolicy"
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+          - ScalingAdjustment: -1
+            MetricIntervalUpperBound: 0
+
+  # CloudWatch Alarms
+  ServiceScaleOutAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-${Environment}-${ServiceName}-ScaleOutAlarm"
+      EvaluationPeriods: 1
+      Statistic: Average
+      TreatMissingData: notBreaching
+      Threshold: 10
+      AlarmDescription: Alarm to add capacity if CPU is high
+      Period: 60
+      AlarmActions:
+        - !Ref ServiceScaleOutPolicy
+      Namespace: AWS/ECS
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !Sub "${ProjectName}-${Environment}-${ServiceName}"
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: CPUUtilization
+
+  ServiceScaleInAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-${Environment}-${ServiceName}-ScaleInAlarm"
+      EvaluationPeriods: 1
+      Statistic: Average
+      TreatMissingData: notBreaching
+      Threshold: 5
+      AlarmDescription: Alarm to reduce capacity if container CPU is low
+      Period: 300
+      AlarmActions:
+        - !Ref ServiceScaleInPolicy
+      Namespace: AWS/ECS
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !Sub "${ProjectName}-${Environment}-${ServiceName}"
+      ComparisonOperator: LessThanThreshold
+      MetricName: CPUUtilization
+
+  # ------------------------------------------------------------#
+  #  Service Dicovery
+  # ------------------------------------------------------------#
+  PrivateDnsNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Vpc: !Ref VPCID
+      Name: !Sub ${ProjectName}-${Environment}-${AppName}.local
+
+  ServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+        NamespaceId: !GetAtt PrivateDnsNamespace.Id
+      Name: "service"

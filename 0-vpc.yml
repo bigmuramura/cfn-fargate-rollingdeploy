@@ -1,0 +1,417 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create network 3 layers with switching single Nat Gateway
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Common Settings
+        Parameters:
+          - ProjectName
+          - Environment
+      - Label:
+          default: VPC Settings
+      - Label:
+          default: NAT Gateway
+        Parameters:
+          - EnableNatGateway
+
+Parameters:
+  ProjectName:
+    Description: Project Name
+    Type: String
+    Default: unnamed
+  Environment:
+    Description: Environment
+    Type: String
+    Default: dev
+    AllowedValues:
+      - prod
+      - dev
+      - stg
+  EnableNatGateway:
+    Description: Enable NAT Gateway.
+    Type: String
+    Default: true
+    AllowedValues: [true, false]
+
+Conditions:
+  EnableNatGateway: !Equals [true, !Ref EnableNatGateway]
+
+Resources:
+  # --------------------------------------------
+  # VPC
+  # --------------------------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpc
+        - Key: Environment
+          Value: !Sub ${Environment}
+
+  # --------------------------------------------
+  # Internet Gateway
+  # --------------------------------------------
+  # Create InternetGateway & VPC Attach
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-igw
+        - Key: Environment
+          Value: !Sub ${Environment}
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # --------------------------------------------
+  # NAT Gateway
+  # --------------------------------------------
+  # Create NatGateway
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Condition: EnableNatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-natgw1
+        - Key: Environment
+          Value: !Sub ${Environment}
+  NatGatewayEIP1:
+    Type: AWS::EC2::EIP
+    Condition: EnableNatGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-natgw-eip1
+        - Key: Environment
+          Value: !Sub ${Environment}
+
+  # --------------------------------------------
+  # Route Table
+  # --------------------------------------------
+  # Create Public RouteTable & Setting Routing
+  PublicRouteTable1:
+    Type: AWS::EC2::RouteTable
+    DependsOn: AttachGateway
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-rtb1
+        - Key: Environment
+          Value: !Sub ${Environment}
+  PublicRoute1:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  # Create Private RouteTable & Setting Routing
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    DependsOn: AttachGateway
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-rtb1
+        - Key: Environment
+          Value: !Sub ${Environment}
+  PrivateRouteNatGW1:
+    Type: AWS::EC2::Route
+    Condition: EnableNatGateway
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+  # Create Isolated RouteTable & Setting Routing
+  IsolatedRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-isolated-rtb1
+        - Key: Environment
+          Value: !Sub ${Environment}
+
+  # --------------------------------------------
+  # Public Subnet
+  # --------------------------------------------
+  # Public 1
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn: AttachGateway
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-subnet1
+        - Key: Environment
+          Value: !Sub ${Environment}
+  PublicSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable1
+  # Public 2
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn: AttachGateway
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-subnet2
+        - Key: Environment
+          Value: !Sub ${Environment}
+  PublicSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable1
+
+  # --------------------------------------------
+  # Private Subnet
+  # --------------------------------------------
+  # Private 1
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.0.17.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-subnet1
+  PrivateSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+  # Private 2
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.0.18.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-subnet2
+  PrivateSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable1
+
+  # --------------------------------------------
+  # Isolated Subnet
+  # --------------------------------------------
+  # Isolated 1
+  IsolatedSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.0.33.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-isolated-subnet1
+        - Key: Environment
+          Value: !Sub ${Environment}
+  IsolatedSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref IsolatedSubnet1
+      RouteTableId: !Ref IsolatedRouteTable1
+  # Isolated 2
+  IsolatedSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.0.34.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-isolated-subnet2
+        - Key: Environment
+          Value: !Sub ${Environment}
+  IsolatedSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref IsolatedSubnet2
+      RouteTableId: !Ref IsolatedRouteTable1
+
+  # --------------------------------------------
+  # Network ACL
+  # --------------------------------------------
+  # Public NACL
+  PublicNetworkACL1:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-nacl1
+  NetworkACLEntryPublicIngress1:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: "0.0.0.0/0"
+      Egress: false
+      NetworkAclId: !Ref PublicNetworkACL1
+      Protocol: -1
+      RuleAction: "allow"
+      RuleNumber: 100
+  NetworkACLEntryPublicEgress1:
+    Type: "AWS::EC2::NetworkAclEntry"
+    Properties:
+      CidrBlock: "0.0.0.0/0"
+      Egress: true
+      NetworkAclId: !Ref PublicNetworkACL1
+      Protocol: -1
+      RuleAction: "allow"
+      RuleNumber: 100
+  # Private NACL
+  PrivateNetworkACL1:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-nacl1
+  NetworkACLEntryPrivateIngress1:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: "0.0.0.0/0"
+      Egress: false
+      NetworkAclId: !Ref PrivateNetworkACL1
+      Protocol: -1
+      RuleAction: "allow"
+      RuleNumber: 100
+  NetworkACLEntryPrivateEgress1:
+    Type: "AWS::EC2::NetworkAclEntry"
+    Properties:
+      CidrBlock: "0.0.0.0/0"
+      Egress: true
+      NetworkAclId: !Ref PrivateNetworkACL1
+      Protocol: -1
+      RuleAction: "allow"
+      RuleNumber: 100
+  # Isolated NACL
+  IsolatedNetworkACL1:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-isolated-nacl1
+  NetworkACLEntryIsolatedIngress1:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: "0.0.0.0/0"
+      Egress: false
+      NetworkAclId: !Ref IsolatedNetworkACL1
+      Protocol: -1
+      RuleAction: "allow"
+      RuleNumber: 100
+  NetworkACLEntryIsolatedEgress1:
+    Type: "AWS::EC2::NetworkAclEntry"
+    Properties:
+      CidrBlock: "0.0.0.0/0"
+      Egress: true
+      NetworkAclId: !Ref IsolatedNetworkACL1
+      Protocol: -1
+      RuleAction: "allow"
+      RuleNumber: 100
+
+  # NetworkACL Association
+  PublicNetworkACLAssocation1:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      NetworkAclId: !Ref PublicNetworkACL1
+  PublicNetworkACLAssocation2:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      NetworkAclId: !Ref PublicNetworkACL1
+  PrivateNetworkACLAssocation1:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      NetworkAclId: !Ref PrivateNetworkACL1
+  PrivateNetworkACLAssocation2:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      NetworkAclId: !Ref PrivateNetworkACL1
+  IsolatedNetworkACLAssocation1:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref IsolatedSubnet1
+      NetworkAclId: !Ref IsolatedNetworkACL1
+  IsolatedNetworkACLAssocation2:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref IsolatedSubnet2
+      NetworkAclId: !Ref IsolatedNetworkACL1
+
+Outputs:
+  ExportVPC:
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VPC
+  ExportPublicSubnet1:
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnet1
+  ExportPublicSubnet2:
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnet2
+  ExportPrivateSubnet1:
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet1
+  ExportPrivateSubnet2:
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet2
+  ExportPrivateRoutetable1:
+    Value: !Ref PrivateRouteTable1
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateRoutetable1
+  ExportIsolatedSubnet1:
+    Value: !Ref IsolatedSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}-IsolatedSubnet1
+  ExportIsolatedSubnet2:
+    Value: !Ref IsolatedSubnet2
+    Export:
+      Name: !Sub ${AWS::StackName}-IsolatedSubnet2
+  ExportIsolatedetable1:
+    Value: !Ref IsolatedRouteTable1
+    Export:
+      Name: !Sub ${AWS::StackName}-Isolatedetable1

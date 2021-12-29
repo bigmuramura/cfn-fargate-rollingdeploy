@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ECR
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Common Settings
+        Parameters:
+          - ProjectName
+          - Environment
+      - Label:
+          default: ECR Settings
+        Parameters:
+          - ECRRepositoryName1
+          - ECRRepositoryName2
+
+Parameters:
+  ProjectName:
+    Description: Project Name
+    Type: String
+    Default: unnamed
+  Environment:
+    Description: Environment
+    Type: String
+    Default: dev
+    AllowedValues:
+      - prod
+      - dev
+      - stg
+  ECRRepositoryName1:
+    Type: String
+    Default: web
+  ECRRepositoryName2:
+    Type: String
+    Default: custom-logrouter-firelens
+
+Resources:
+  # --------------------------------------------
+  # ECR
+  # -------------------------------------------
+  ECR1:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${ProjectName}-${Environment}-${ECRRepositoryName1}
+      ImageTagMutability: "MUTABLE"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"古い世代のイメージを削除","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}'
+        RegistryId: !Ref AWS::AccountId
+  ECR2:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${ProjectName}-${Environment}-${ECRRepositoryName2}
+      ImageTagMutability: "MUTABLE"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"古い世代のイメージを削除","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}'
+        RegistryId: !Ref AWS::AccountId
+
+Outputs:
+  ExportECR1:
+    Value: !Ref ECR1
+    Export:
+      Name: !Sub ${AWS::StackName}-ECR1
+  ExportECR2:
+    Value: !Ref ECR2
+    Export:
+      Name: !Sub ${AWS::StackName}-ECR2
